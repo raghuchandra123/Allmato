@@ -1,173 +1,105 @@
-# Zomato – Food Ordering System
+# Allmato — Fair Restaurant Food Ordering
 
-## Functional Requirements
+Allmato is a food ordering application designed to make restaurant business more equitable. Instead of allowing a small number of restaurants to capture most of the orders, Allmato aims to distribute business fairly by considering restaurant ratings, order-processing capacity, and the revenue each restaurant has generated during the day.
 
-* Customers and restaurants can register with the application.
+The goal is simple: **help restaurants receive a fair share of business while ensuring that customer orders can be fulfilled reliably.**
 
-* Each restaurant has:
+## 📱 Application Preview
 
-  * Opening time and closing time
-  * Working days
-  * A menu
+<!-- Add your application screenshot to the repository at docs/images/allmato.png -->
 
-* Each menu contains multiple items.
+![Allmato food ordering application](docs/images/allmato.png)
 
-* Each menu item has:
+The application displays a paginated menu of food items with their prices. Users can select quantities, view the total amount, and place an order.
 
-  * Name
-  * Price
-  * Description
-  * Quantity in grams
-  * Veg / Non-veg
-  * Batch size
-  * Preparation time per batch
+## 🔄 How Order Processing Works
 
-* Customers can search for a particular food item and see:
+### 1. Paginated Menu Loading
 
-  * Restaurants that serve the item
-  * Price of the item at each restaurant
-  * Estimated time to prepare **one quantity** of the item
+The Android application fetches menu items from the DynamoDB `CombinedMenu` table through the Java backend.
 
----
+- The initial API request retrieves a page of menu items.
+- As the user scrolls toward the bottom of the list, the application requests the next page.
+- Pagination continues until no more items are available.
+- ViewModel-based state management helps preserve the menu and selected quantities across configuration changes and background transitions.
 
-## POINT OF FOCUS: How should we handle orders?
+This avoids loading the entire menu into the application at once.
 
-The main challenge is to make sure that a restaurant does not receive more orders than it can reasonably process, while also avoiding unnecessary restrictions for customers.
+### 2. Order Submission
 
-### Approach 1: Restaurant-level limit
+When the user presses the **Order** button:
 
-We can set a limit on the number of pending orders that a restaurant can have at a time.
+1. The Android application calls the Java order API.
+2. The backend attempts to publish an order message to Kafka.
+3. The API returns an immediate response indicating whether the order was accepted for processing or the submission failed.
 
-For example:
+The API response acknowledges submission; restaurant allocation happens asynchronously and may take additional time.
 
-```text
-Maximum pending orders = 10
-```
+### 3. Parallel Order Processing
 
-Once the restaurant has 10 pending orders, we do not allow any new orders until some of the existing orders are completed.
+Multiple instances of the order-processing service subscribe to Kafka using a consumer group.
 
-**Pros:**
+- Kafka distributes partitions among the available consumers.
+- Different workers can process messages concurrently, subject to partition availability.
+- The workers independently execute the restaurant-selection and allocation workflow.
 
-* Simple to implement.
-* Prevents a large buildup of orders.
-* Ensures that the restaurant does not receive more orders than it can handle.
+This separates order submission from potentially expensive allocation work and allows the processing layer to scale.
 
-**Cons:**
+### 4. Fair Restaurant Selection
 
-* From the customer's perspective, this can be frustrating.
-* The customer may see that the restaurant is not accepting orders and has to wait until it becomes available again.
-* The restaurant may lose customers who are ready to place an order.
+For each incoming order, the processing service evaluates restaurant information stored in DynamoDB.
 
----
+The selection considers:
 
-### Approach 2: Item-level limit
+- **Daily revenue:** How much business the restaurant has generated during the current day.
+- **Customer ratings:** The restaurant's review and rating information.
+- **Processing capacity:** How quickly the restaurant can process orders and whether it can fulfil the requested items.
 
-Instead of setting a limit for the entire restaurant, we can set limits for individual items.
+The intention is to favour restaurants that deserve more business while respecting their operational capacity.
 
-For example:
+### 5. Redis-Based Restaurant Locking
 
-```text
-Pizza → maximum 20 pending orders
-Idly  → maximum 100 pending orders
-```
+Because multiple workers may process orders simultaneously, concurrent allocation could otherwise assign work to the same restaurant beyond the intended allocation limits.
 
-Once the limit for an item is reached, we do not accept any more orders for that item.
+Redis is used to coordinate restaurant allocation:
 
-Other items can still remain available.
+1. A worker attempts to acquire a lock for a candidate restaurant.
+2. If the restaurant is already being processed by another worker, the worker avoids that restaurant and considers another candidate.
+3. Once the lock is acquired, the worker checks whether the restaurant can fulfil the requested order.
+4. If it can fulfil the order, the worker allocates the order to that restaurant.
+5. If it can fulfil only part of the order, the remaining items are considered for further allocation.
+6. The lock is released when the protected allocation operation finishes.
 
-**Pros:**
+This coordination helps prevent conflicting allocations across concurrent workers.
 
-* More flexible than setting a limit for the entire restaurant.
-* The restaurant does not have to become completely unavailable.
-* Items that still have capacity can continue accepting orders.
+### 6. Allocation Completion Notification
 
-**Cons:**
+Once the order has been fully allocated, a notification is sent back to the application so the user can be informed of the allocation result.
 
-* The restaurant can still lose customers for items that have reached their limit.
-* A customer may repeatedly see that a particular item, such as pizza, is unavailable.
-* Managing capacity becomes more complex when an order contains multiple different items.
+This separates the initial order-submission response from the eventual allocation-completion notification.
 
----
+## 🛡️ UI State and Failure Handling
 
-### Approach 3: Estimate ETA for every order
+The Android application uses ViewModels and Jetpack Compose state management to keep the UI consistent during normal application lifecycle events.
 
-Instead of simply rejecting orders when a limit is reached, we estimate the ETA for each new order.
+- **Configuration changes:** Preserve menu and quantity-selection state across device rotation.
+- **Background and foreground transitions:** Retain UI state while the application moves between foreground and background.
+- **API failures:** Handle backend unavailability through failure handling and logging rather than allowing an unhandled failure to crash the application.
+- **Asynchronous operations:** Keep network requests and other long-running work separate from direct UI rendering.
 
-The ETA can be calculated based on factors such as:
+## 🚀 Design Principles
 
-* Existing pending orders
-* Items in the new order
-* Preparation time of the items
-* Restaurant's current workload
+Allmato is built around a few core architectural principles:
 
-We show the estimated time to the customer.
+- **Fairness:** Restaurant selection considers daily business, ratings, and capacity.
+- **Separation of concerns:** The Android UI, backend APIs, and asynchronous processing have distinct responsibilities.
+- **Concurrency:** Kafka consumer groups enable parallel message processing.
+- **Coordination:** Redis helps workers coordinate access to restaurant allocation.
+- **Incremental loading:** Paginated menu retrieval avoids fetching all menu items upfront.
+- **Lifecycle-aware UI:** ViewModel-based state management supports a more robust Android experience.
 
-The customer can then decide whether the ETA is acceptable and place the order.
+## 🌱 Vision
 
-For example:
+Allmato explores a different approach to food ordering: one where restaurant discovery and order allocation are designed not only around customer demand, but also around sustainable business distribution.
 
-```text
-Pizza
-Price: ₹300
-Estimated preparation/delivery time: 45 minutes
-```
-
-The customer can decide whether they are willing to wait 45 minutes before placing the order.
-
-**Pros:**
-
-* The restaurant does not unnecessarily reject customers.
-* Customers can decide based on the expected waiting time.
-* The restaurant can continue accepting orders even when it is busy, as long as the estimated time is communicated to the customer.
-
-**Cons:**
-
-* ETA is only an estimate and can never be completely accurate.
-* We need to make sure that the actual time does not differ significantly from the estimated time.
-
-For example, suppose the restaurant currently has no pending orders. We may initially estimate an ETA of 10 minutes.
-
-If 1,000 orders arrive at almost the same time, the actual preparation time could become much higher.
-
-This situation is unlikely during normal times, but it can happen during exceptional periods such as New Year's Eve or other major events. In such situations, restaurants would ideally prepare for the expected increase in demand.
-
----
-
-## Order Flow
-
-Once the customer decides to place the order:
-
-```text
-Customer places order
-        ↓
-Customer makes payment
-        ↓
-Payment successful
-        ↓
-Order is confirmed
-        ↓
-Restaurant prepares the order
-        ↓
-Order is packed
-        ↓
-Order is ready for delivery
-        ↓
-Order is delivered
-```
-
-The customer should be able to check the **current status of the order at any time**.
-
----
-
-## Out of Scope
-
-The following functionalities are out of scope for this design:
-
-* Delivery process
-* Delivery-partner assignment
-* Distance-related functionality
-* Location-based restaurant filtering
-
-  * For example, showing only restaurants within a 5 km radius
-* Reviews
-* Returns / refund-related functionality
+By combining asynchronous processing, distributed coordination, and capacity-aware restaurant selection, Allmato aims to help prevent smaller or newly opened restaurants from being overlooked while still considering ratings and the ability to fulfil orders.
